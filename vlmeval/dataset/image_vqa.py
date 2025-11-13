@@ -3726,3 +3726,90 @@ class MathCanvas(ImageBaseDataset):
             json.dump(summary_dict, f, ensure_ascii=False, indent=4)
 
         return summary_dict
+
+class BabyVision(ImageVQADataset):
+    TYPE = 'VQA'
+    DATASET_URL = {
+        "BabyVision": ""
+    }
+    DATASET_MD5 = {
+        "BabyVision": ""
+    }
+    
+    def build_prompt(self, line):
+        if isinstance(line, int):
+            line = self.data.iloc[line]
+        tgt_path=self.dump_image(line)
+
+        question=line['question']
+        prompt=''
+        prompt+=question
+        # prompt+='\n'
+
+        msgs = []
+        if isinstance(tgt_path, list):
+            msgs.extend([dict(type='image', value=p) for p in tgt_path])
+        else:
+            msgs = [dict(type='image', value=tgt_path)]
+        msgs.append(dict(type='text', value=prompt))
+
+        return msgs
+
+    def evaluate(self, eval_file, **judge_kwargs):
+        from .utils.babyvision import llm_judge_prompt, INPUT_TEMPLATE
+        from .utils.babyvision import BabyVisionACC, BabyVision_auxeval
+
+        model_name = judge_kwargs.get('model')
+        assert model_name in ['gpt-4-0125', 'gpt-4-turbo', 'gpt-4o-mini'], model_name
+
+        name_str_map = {'gpt-4-0125': 'gpt4', 'gpt-4-turbo': 'gpt4-turbo', 'gpt-4o-mini': 'gpt4o-mini'}
+        name_str = name_str_map[model_name] if model_name in name_str_map else model_name
+
+        judge_model = build_judge(**judge_kwargs)
+
+        if not judge_model.working():
+            warnings.warn('OPENAI API is not working properly')
+            warnings.warn(DEBUG_MESSAGE)
+        assert judge_model.working(), 'BabyVision evaluation requires a working OPENAI API\n' + DEBUG_MESSAGE
+
+        suffix = eval_file.split('.')[-1]
+        storage = eval_file.replace(f'.{suffix}', f'_{name_str}.xlsx')
+        tmp_file = eval_file.replace(f'.{suffix}', f'_{name_str}.pkl')
+        nproc = judge_kwargs.pop('nproc', 4)
+
+        data = load(eval_file)
+
+        if not osp.exists(storage):
+            lt = len(data)
+            lines = [data.iloc[i] for i in range(lt)]
+            tups = [(judge_model, line, llm_judge_prompt, INPUT_TEMPLATE) for line in lines]
+            indices = [line['index'] if 'index' in line else i for i, line in enumerate(lines)]
+
+            ans = load(tmp_file) if osp.exists(tmp_file) else {}
+            tups = [x for x, i in zip(tups, indices) if i not in ans]
+            remaining_indices = [i for i in indices if i not in ans]
+
+            if len(remaining_indices):
+                new_results = track_progress_rich(
+                    BabyVision_auxeval,
+                    tups,
+                    nproc=nproc,
+                    chunksize=nproc,
+                    keys=remaining_indices,
+                    save=tmp_file,
+                )
+                ans = load(tmp_file)
+                for k, v in zip(remaining_indices, new_results):
+                    ans[k] = v
+
+            data['hit'] = [ans[idx]['hit'] for idx in indices]
+            data['extracted_answer'] = [ans[idx]['extracted_answer'] for idx in indices]
+            data['judge_response'] = [ans[idx]['judge_response'] for idx in indices]
+
+            dump(data, storage)
+
+        accuracy_scores = BabyVisionACC(storage)
+        combine_score = pd.DataFrame([accuracy_scores])
+        score_pth = storage.replace('.xlsx', '_score.csv')
+        dump(combine_score, score_pth)
+        return combine_score
