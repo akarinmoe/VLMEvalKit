@@ -1,7 +1,7 @@
 import re
 from ...smp import *
 
-
+Option_list=['A','B','C','D','E','F','G','H','I','J']
 
 llm_judge_prompt="""You are a careful and strict evaluator. You will be given:
 
@@ -75,7 +75,14 @@ def BabyVision_auxeval(model, line, llm_judge_prompt, INPUT_TEMPLATE):
             extracted_answer = prediction
         
         question = str(line['question']) if 'question' in line else str(line.get('query', ''))
-        groundtruth = str(line['answer'])
+        
+        groundtruth = ''
+        anstype=line['ansType']
+        if anstype=='blank':
+            groundtruth=line.get('blankAns','')
+        elif anstype=='choice':
+            groundtruth = Option_list[line['choiceAns']]
+
         
         user_input = INPUT_TEMPLATE.format(
             question=question,
